@@ -1,0 +1,571 @@
+@page "/"
+@implements IDisposable
+@inject IJSRuntime JS
+
+<PageTitle>Lille Ur-mester</PageTitle>
+
+<main class="clock-page">
+    <header class="title">
+        <h1>Lille Ur-mester</h1>
+        <div class="title-buttons">
+            <button class="pill sound-btn" @onclick="ToggleSound"
+                    aria-label="@(_soundOn ? "Slå lyden fra" : "Slå lyden til")">
+                @(_soundOn ? "🔊" : "🔇")
+            </button>
+            <div class="pill stars" aria-label="@_stars stjerner">
+                ⭐ @_stars
+                @if (_stars >= 10)
+                {
+                    <span class="trophies">🏆 @(_stars / 10)</span>
+                }
+            </div>
+            <a class="kg-home" href="../" aria-label="Alle spil" title="Alle spil"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11.5 12 4l9 7.5M5.5 9.5V20h4.5v-6h4v6h4.5V9.5" /></svg><span class="kg-text">Alle spil</span></a>
+        </div>
+    </header>
+
+    @* What to practise: the three topics are the big choice, so they get the big buttons. *@
+    <nav class="topics" aria-label="Hvad vil du øve?">
+        <button class="topic hours @(_topic == Topic.Hours ? "active" : "")" aria-pressed="@(_topic == Topic.Hours)"
+                @onclick="() => SetTopic(Topic.Hours)">
+            <span class="topic-icon">🔴</span> Timer
+        </button>
+        <button class="topic minutes @(_topic == Topic.Minutes ? "active" : "")" aria-pressed="@(_topic == Topic.Minutes)"
+                @onclick="() => SetTopic(Topic.Minutes)">
+            <span class="topic-icon">🔵</span> Minutter
+        </button>
+        <button class="topic both @(_topic == Topic.Both ? "active" : "")" aria-pressed="@(_topic == Topic.Both)"
+                @onclick="() => SetTopic(Topic.Both)">
+            <span class="topic-icon">⏰</span> Begge
+        </button>
+    </nav>
+
+    <div class="play">
+        <div class="clock-column">
+            @* The face is drawn in a 200 x 200 box centred on 0,0; angles start at 12 o'clock and go clockwise. *@
+            <svg @ref="_clockRef" tabindex="0" @onkeydown="OnClockKey"
+                 class="clock @(_solved ? "solved" : "") @(_direction == Direction.Read ? "reading" : "") @(_dragHand is not null ? "dragging" : "")"
+                 viewBox="-100 -100 200 200" role="img" aria-label="Urskive. Træk viserne, eller brug piletasterne.">
+                <circle class="rim" r="97" />
+                @* Inner disc for the hour hand, outer ring for the minute hand, coloured like the hands. *@
+                <circle class="zone minute-zone" r="94" />
+                <circle class="zone hour-zone" r="@F(ZoneRadius)" />
+
+                @* Minute ticks: a small one for every minute and a big one for every five. *@
+                @for (var minute = 0; minute < 60; minute++)
+                {
+                    var five = minute % 5 == 0;
+                    var (x1, y1) = Point(minute * 6, five ? 70 : 73.5);
+                    var (x2, y2) = Point(minute * 6, 78.5);
+                    <line class="tick @(five ? "five" : "")" x1="@F(x1)" y1="@F(y1)" x2="@F(x2)" y2="@F(y2)" />
+                }
+
+                @if (_hint && !_solved)
+                {
+                    if (!HourLocked && _hour != _game.Time.FaceHour)
+                    {
+                        var (x, y) = Point(_game.Time.FaceHour * 30, HourNumberRadius);
+                        <circle class="hint hour-hint" cx="@F(x)" cy="@F(y)" r="12" />
+                    }
+                    if (!MinuteLocked && _minute != _game.Time.Minute)
+                    {
+                        var (x, y) = Point(_game.Time.Minute * 6, MinuteNumberRadius);
+                        <circle class="hint minute-hint" cx="@F(x)" cy="@F(y)" r="8.5" />
+                    }
+                }
+
+                @if (_showMinuteNumbers)
+                {
+                    @for (var minute = 0; minute < 60; minute += 5)
+                    {
+                        var (x, y) = Point(minute * 6, MinuteNumberRadius);
+                        @Label("minute-number", x, y, minute.ToString())
+                    }
+                }
+
+                @if (_showHourNumbers)
+                {
+                    @for (var hour = 1; hour <= 12; hour++)
+                    {
+                        var (x, y) = Point(hour * 30, HourNumberRadius);
+                        @Label("hour-number", x, y, hour.ToString())
+                    }
+                }
+
+                @* SVG draws in order, so the hour hand comes last to lie on top of the minute hand. *@
+                <g class="hand minute-hand @(MinuteLocked ? "locked" : "") @(_dragHand == Hand.Minute ? "grabbed" : "")"
+                   style="transform: rotate(@F(_minuteAngle)deg)">
+                    <line x1="0" y1="10" x2="0" y2="@F(-MinuteHandLength)" />
+                    <circle class="knob" cy="@F(-MinuteHandLength)" r="5.5" />
+                </g>
+                <g class="hand hour-hand @(HourLocked ? "locked" : "") @(_dragHand == Hand.Hour ? "grabbed" : "")"
+                   style="transform: rotate(@F(_hourAngle)deg)">
+                    <line x1="0" y1="8" x2="0" y2="@F(-HourHandLength)" />
+                    <circle class="knob" cy="@F(-HourHandLength)" r="6.5" />
+                </g>
+                <circle class="centre" r="5" />
+
+                @* The 13–24 numbers go on top of the hands, so the hour hand never hides them. *@
+                @if (_showDayNumbers)
+                {
+                    @for (var hour = 1; hour <= 12; hour++)
+                    {
+                        var (x, y) = Point(hour * 30, DayNumberRadius);
+                        @Label("day-number", x, y, (hour + 12).ToString())
+                    }
+                }
+            </svg>
+
+            @* Helpers a grown-up (or the child) can switch on and off: which numbers the face shows. *@
+            <div class="helpers" role="group" aria-label="Tal på uret">
+                <span class="helpers-label">Tal på uret</span>
+                <button class="chip hour-chip @(_showHourNumbers ? "on" : "")" aria-pressed="@_showHourNumbers"
+                        @onclick="() => Toggle(ref _showHourNumbers)">1–12</button>
+                <button class="chip day-chip @(_showDayNumbers ? "on" : "")" aria-pressed="@_showDayNumbers"
+                        @onclick="() => Toggle(ref _showDayNumbers)">13–24</button>
+                <button class="chip minute-chip @(_showMinuteNumbers ? "on" : "")" aria-pressed="@_showMinuteNumbers"
+                        @onclick="() => Toggle(ref _showMinuteNumbers)">0–55</button>
+            </div>
+        </div>
+
+        <aside class="panel">
+            <div class="modes">
+                <div class="segmented" role="group" aria-label="Stil eller læs">
+                    <button class="@(_direction == Direction.Set ? "active" : "")" aria-pressed="@(_direction == Direction.Set)"
+                            @onclick="() => SetDirection(Direction.Set)">✋ Stil</button>
+                    <button class="@(_direction == Direction.Read ? "active" : "")" aria-pressed="@(_direction == Direction.Read)"
+                            @onclick="() => SetDirection(Direction.Read)">👀 Læs</button>
+                </div>
+                <button class="chip day-toggle @(_dayHours ? "on" : "")" aria-pressed="@_dayHours" @onclick="ToggleDayHours"
+                        title="Øv også klokken 13 til 23">24 timer</button>
+            </div>
+
+            @if (_direction == Direction.Set)
+            {
+                <p class="question">@SetQuestion</p>
+                <div class="target" @key="_round">
+                    @Digital(_game.Time, "big")
+                    @if (_dayHours)
+                    {
+                        <span class="target-day" title="@EasyGame.DayName(_game.Time.Hour)">@EasyGame.DayIcon(_game.Time.Hour)</span>
+                    }
+                </div>
+            }
+            else
+            {
+                <p class="question">
+                    Hvad er klokken?
+                    @if (_dayHours)
+                    {
+                        <span class="question-day" title="@EasyGame.DayName(_game.Time.Hour)">@EasyGame.DayIcon(_game.Time.Hour)</span>
+                    }
+                </p>
+                <div class="choices" @key="_round">
+                    @foreach (var choice in _game.Choices)
+                    {
+                        var c = choice;
+                        var state = _solved && c == _game.Time ? "right" : _wrongChoices.Contains(c) ? "wrong" : "";
+                        <button class="choice @state" disabled="@(_solved || _wrongChoices.Contains(c))" @onclick="() => Pick(c)">
+                            @Digital(c, "small")
+                        </button>
+                    }
+                </div>
+            }
+
+            <div class="feedback" aria-live="polite">
+                @if (_solved)
+                {
+                    <div class="message success">🎉 Ja! Klokken er @_game.Time</div>
+                }
+                else if (_message is not null)
+                {
+                    <div class="message try-again" @key="_messageKey">@_message</div>
+                }
+            </div>
+
+            @if (_solved)
+            {
+                <button class="big-btn next-btn" @onclick="NextRound">Næste ➜</button>
+            }
+            else if (_direction == Direction.Set)
+            {
+                <button class="big-btn check-btn" @onclick="Check">Tjek</button>
+            }
+        </aside>
+    </div>
+
+    <footer class="credits">Lavet med kærlighed 💛 (c) 2026 Per Hejndorf, Kreaton – @BuildInfo.Display</footer>
+
+    @if (_party)
+    {
+        <div class="party">
+            @for (var i = 0; i < 40; i++)
+            {
+                <span class="confetti" style="@Confetti(i)"></span>
+            }
+            <div class="party-card">
+                <div class="party-trophy">🏆</div>
+                <div class="party-text">@_stars stjerner!</div>
+                <button class="big-btn next-btn" @onclick="ClosePartyAndContinue">Spil videre ➜</button>
+            </div>
+        </div>
+    }
+</main>
+
+@code {
+    private enum Hand { Hour, Minute }
+
+    // Radii in the 200 x 200 face. Inside ZoneRadius a touch moves the hour hand, outside it the minute hand.
+    private const double ZoneRadius = 66;
+    private const double HourNumberRadius = 53;
+    private const double DayNumberRadius = 30;
+    private const double MinuteNumberRadius = 86.5;
+    private const double HourHandLength = 36;
+    private const double MinuteHandLength = 74;
+    private const string SettingsKey = "clockmastereasy.settings";
+
+    private readonly EasyGame _game = new();
+    private readonly HashSet<ClockTime> _wrongChoices = [];
+    private ElementReference _clockRef;
+    private DotNetObjectReference<Home>? _self;
+
+    private Topic _topic = Topic.Hours;
+    private Direction _direction = Direction.Set;
+    private bool _dayHours;
+    private bool _showHourNumbers = true;
+    private bool _showDayNumbers;
+    private bool _showMinuteNumbers = true;
+
+    private int _hour = 12;          // where the hour hand points, 1–12
+    private int _minute;             // where the minute hand points, 0–55
+    private double _hourAngle;       // kept unwrapped, so the hand turns the short way past 12
+    private double _minuteAngle;
+    private Hand? _dragHand;
+
+    private bool _solved;
+    private int _wrongTries;
+    private bool _hint;
+    private string? _message;
+    private int _messageKey;
+    private int _round;
+    private int _stars;
+    private bool _party;
+    private bool _soundOn = true;
+
+    private bool HourLocked => _direction == Direction.Read || _topic == Topic.Minutes;
+    private bool MinuteLocked => _direction == Direction.Read || _topic == Topic.Hours;
+
+    private string SetQuestion => _topic switch
+    {
+        Topic.Hours => "Flyt den lille røde viser",
+        Topic.Minutes => "Flyt den store blå viser",
+        _ => "Flyt begge visere",
+    };
+
+    protected override void OnInitialized() => NextRound();
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender) return;
+
+        _self = DotNetObjectReference.Create(this);
+        try
+        {
+            await JS.InvokeVoidAsync("clockInput.attach", _clockRef, _self);
+            LoadSettings(await JS.InvokeAsync<string?>("easyStore.get", SettingsKey));
+        }
+        catch (JSException)
+        {
+            // Without the helpers the arrow keys still work.
+        }
+        NextRound();
+        StateHasChanged();
+    }
+
+    // ---------- Rounds ----------
+
+    private void NextRound()
+    {
+        _game.NewRound(_topic, _dayHours);
+        _round++;
+        _solved = false;
+        _wrongTries = 0;
+        _hint = false;
+        _message = null;
+        _wrongChoices.Clear();
+
+        var target = _game.Time;
+        if (_direction == Direction.Read)
+        {
+            MoveHour(target.FaceHour);
+            MoveMinute(target.Minute);
+            return;
+        }
+
+        // A locked hand already shows its part of the time; a free hand starts at 12, or at 6 if 12 is the answer.
+        MoveHour(_topic == Topic.Minutes ? target.FaceHour : target.FaceHour == 12 ? 6 : 12);
+        MoveMinute(_topic == Topic.Hours ? 0 : target.Minute == 0 ? 30 : 0);
+    }
+
+    private async Task Check()
+    {
+        if (_solved) return;
+
+        var hourRight = HourLocked || _game.HourIsRight(_hour);
+        var minuteRight = MinuteLocked || _game.MinuteIsRight(_minute);
+        if (hourRight && minuteRight)
+        {
+            await Win();
+            return;
+        }
+
+        _wrongTries++;
+        // After two misses the right place on the face starts to glow.
+        _hint = _wrongTries >= 2;
+        _message = (_topic, hourRight, minuteRight) switch
+        {
+            (Topic.Both, true, false) => "Den lille er rigtig 👍 Prøv den store igen!",
+            (Topic.Both, false, true) => "Den store er rigtig 👍 Prøv den lille igen!",
+            _ when _hint => "Prøv igen! Kig efter det, der lyser ✨",
+            _ => "Ups! Prøv igen!",
+        };
+        _messageKey++;
+        await Play("tryAgain");
+    }
+
+    private async Task Pick(ClockTime choice)
+    {
+        if (_solved) return;
+        if (choice == _game.Time)
+        {
+            await Win();
+            return;
+        }
+
+        _wrongChoices.Add(choice);
+        _message = "Ups! Prøv igen!";
+        _messageKey++;
+        await Play("tryAgain");
+    }
+
+    private async Task Win()
+    {
+        _solved = true;
+        _message = null;
+        _hint = false;
+        _stars++;
+        if (_stars % 10 == 0)
+        {
+            _party = true;
+            await Play("trophy");
+        }
+        else
+        {
+            await Play("success");
+        }
+    }
+
+    private void ClosePartyAndContinue()
+    {
+        _party = false;
+        NextRound();
+    }
+
+    // ---------- Settings ----------
+
+    private void SetTopic(Topic topic)
+    {
+        if (_topic == topic) return;
+        _topic = topic;
+        SettingsChanged();
+    }
+
+    private void SetDirection(Direction direction)
+    {
+        if (_direction == direction) return;
+        _direction = direction;
+        SettingsChanged();
+    }
+
+    private void ToggleDayHours()
+    {
+        _dayHours = !_dayHours;
+        // The 13–24 numbers come along to help; they can be switched off again on their own.
+        _showDayNumbers = _dayHours;
+        SettingsChanged();
+    }
+
+    private void Toggle(ref bool setting)
+    {
+        setting = !setting;
+        _ = SaveSettings();
+    }
+
+    private void SettingsChanged()
+    {
+        _ = SaveSettings();
+        NextRound();
+    }
+
+    private async Task SaveSettings()
+    {
+        var value = string.Join(",", (int)_topic, (int)_direction, B(_dayHours), B(_showHourNumbers), B(_showDayNumbers), B(_showMinuteNumbers));
+        try
+        {
+            await JS.InvokeVoidAsync("easyStore.set", SettingsKey, value);
+        }
+        catch (JSException)
+        {
+        }
+
+        static int B(bool value) => value ? 1 : 0;
+    }
+
+    private void LoadSettings(string? value)
+    {
+        var parts = value?.Split(',');
+        if (parts is not { Length: 6 } || !parts.All(p => int.TryParse(p, out _))) return;
+
+        var n = parts.Select(int.Parse).ToArray();
+        if (Enum.IsDefined((Topic)n[0])) _topic = (Topic)n[0];
+        if (Enum.IsDefined((Direction)n[1])) _direction = (Direction)n[1];
+        _dayHours = n[2] == 1;
+        _showHourNumbers = n[3] == 1;
+        _showDayNumbers = n[4] == 1;
+        _showMinuteNumbers = n[5] == 1;
+    }
+
+    // ---------- Moving the hands ----------
+
+    /// <summary>Called from clock.js for every press, drag and release on the face.</summary>
+    [JSInvokable]
+    public async Task OnClockPointer(double angle, double distance, string phase)
+    {
+        if (_solved || _direction == Direction.Read || _party) return;
+
+        if (phase == "down")
+        {
+            if (distance > 100) return;
+            _dragHand = _topic switch
+            {
+                Topic.Hours => Hand.Hour,
+                Topic.Minutes => Hand.Minute,
+                _ => distance < ZoneRadius ? Hand.Hour : Hand.Minute,
+            };
+        }
+        if (_dragHand is not { } hand) return;
+
+        // Snap to the nearest of the twelve places: an hour, or five minutes.
+        var place = (int)Math.Round(angle / 30) % 12;
+        var moved = hand == Hand.Hour ? MoveHour(place == 0 ? 12 : place) : MoveMinute(place * 5);
+
+        if (phase == "up") _dragHand = null;
+
+        if (moved)
+        {
+            _message = null;
+            await Play("tick");
+        }
+        StateHasChanged();
+    }
+
+    private async Task OnClockKey(KeyboardEventArgs e)
+    {
+        if (e.Key == "Enter")
+        {
+            if (_solved) NextRound();
+            else if (_direction == Direction.Set) await Check();
+            return;
+        }
+        if (_solved || _direction == Direction.Read) return;
+
+        var step = e.Key is "ArrowRight" or "ArrowUp" ? 1 : e.Key is "ArrowLeft" or "ArrowDown" ? -1 : 0;
+        if (step == 0) return;
+
+        // With both hands free, left/right turns the hour hand and up/down the minute hand.
+        var useMinute = _topic == Topic.Minutes || (_topic == Topic.Both && e.Key is "ArrowUp" or "ArrowDown");
+        var moved = useMinute
+            ? MoveMinute((_minute + step * 5 + 60) % 60)
+            : MoveHour((_hour + step + 11) % 12 + 1);
+        if (moved)
+        {
+            _message = null;
+            await Play("tick");
+        }
+    }
+
+    private bool MoveHour(int hour)
+    {
+        if (hour == _hour) return false;
+        _hour = hour;
+        _hourAngle = Turn(_hourAngle, hour * 30);
+        return true;
+    }
+
+    private bool MoveMinute(int minute)
+    {
+        if (minute == _minute) return false;
+        _minute = minute;
+        _minuteAngle = Turn(_minuteAngle, minute * 6);
+        return true;
+    }
+
+    /// <summary>The angle nearest to <paramref name="current"/> that points the same way as <paramref name="target"/>.</summary>
+    private static double Turn(double current, double target)
+    {
+        var delta = ((target - current) % 360 + 540) % 360 - 180;
+        return current + delta;
+    }
+
+    // ---------- Sound ----------
+
+    private void ToggleSound() => _soundOn = !_soundOn;
+
+    private async Task Play(string sound)
+    {
+        if (!_soundOn) return;
+        try
+        {
+            await JS.InvokeVoidAsync($"gameSounds.{sound}");
+        }
+        catch (JSException)
+        {
+            // No audio support: the game still works without sound.
+        }
+    }
+
+    public void Dispose() => _self?.Dispose();
+
+    // ---------- Drawing helpers ----------
+
+    /// <summary>A digital clock with the hour in red and the minutes in blue, like the hands. The part not being practised is dimmed.</summary>
+    private RenderFragment Digital(ClockTime time, string size) => __builder =>
+    {
+        <span class="digital @size"><span class="d-hour @(_topic == Topic.Minutes ? "dim" : "")">@time.HourText</span><span class="d-colon">:</span><span class="d-minute @(_topic == Topic.Hours ? "dim" : "")">@time.MinuteText</span></span>
+    };
+
+    // <text> is a Razor keyword, so the SVG element goes in as raw markup.
+    private static RenderFragment Label(string cssClass, double x, double y, string text) => __builder =>
+    {
+        @((MarkupString)$"<text class=\"{cssClass}\" x=\"{F(x)}\" y=\"{F(y)}\">{text}</text>")
+    };
+
+    private static string Confetti(int i)
+    {
+        string[] colours = ["#fa5252", "#228be6", "#40c057", "#fab005", "#845ef7", "#ff922b"];
+        // Spread out by a fixed pattern rather than Random, so the pieces don't jump on re-render.
+        var left = i * 37 % 100;
+        var delay = i * 53 % 100 / 100.0;
+        var duration = 1.8 + i * 29 % 10 / 10.0;
+        return $"left:{left}%;background:{colours[i % colours.Length]};animation-delay:{F(delay)}s;animation-duration:{F(duration)}s";
+    }
+
+    /// <summary>The point at <paramref name="degrees"/> clockwise from 12 o'clock.</summary>
+    private static (double X, double Y) Point(double degrees, double radius)
+    {
+        var radians = degrees * Math.PI / 180;
+        return (radius * Math.Sin(radians), -radius * Math.Cos(radians));
+    }
+
+    // SVG wants "." decimals whatever the browser's culture is.
+    private static string F(double value) => value.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+}
